@@ -36,6 +36,7 @@ import org.apache.kafka.controller.BootstrapMetadata
 import org.apache.kafka.metadata.MetadataRecordSerde
 import org.apache.kafka.raft.RaftConfig.{AddressSpec, InetAddressSpec}
 import org.apache.kafka.server.common.{ApiMessageAndVersion, MetadataVersion}
+import org.apache.kafka.server.fault.MockFaultHandler
 import org.apache.zookeeper.client.ZKClientConfig
 import org.apache.zookeeper.{WatchedEvent, Watcher, ZooKeeper}
 import org.junit.jupiter.api.Assertions._
@@ -47,9 +48,12 @@ import scala.compat.java8.OptionConverters._
 import scala.jdk.CollectionConverters._
 
 trait QuorumImplementation {
-  def createBroker(config: KafkaConfig,
-                   time: Time,
-                   startup: Boolean): KafkaBroker
+  def createBroker(
+    config: KafkaConfig,
+    time: Time = Time.SYSTEM,
+    startup: Boolean = true,
+    threadNamePrefix: Option[String] = None,
+  ): KafkaBroker
 
   def shutdown(): Unit
 }
@@ -61,10 +65,13 @@ class ZooKeeperQuorumImplementation(
   val adminZkClient: AdminZkClient,
   val log: Logging
 ) extends QuorumImplementation {
-  override def createBroker(config: KafkaConfig,
-                            time: Time,
-                            startup: Boolean): KafkaBroker = {
-    val server = new KafkaServer(config, time, None, false)
+  override def createBroker(
+    config: KafkaConfig,
+    time: Time,
+    startup: Boolean,
+    threadNamePrefix: Option[String],
+  ): KafkaBroker = {
+    val server = new KafkaServer(config, time, threadNamePrefix, false)
     if (startup) server.startup()
     server
   }
@@ -81,9 +88,12 @@ class KRaftQuorumImplementation(val raftManager: KafkaRaftManager[ApiMessageAndV
                                 val controllerQuorumVotersFuture: CompletableFuture[util.Map[Integer, AddressSpec]],
                                 val clusterId: String,
                                 val log: Logging) extends QuorumImplementation {
-  override def createBroker(config: KafkaConfig,
-                            time: Time,
-                            startup: Boolean): KafkaBroker = {
+  override def createBroker(
+    config: KafkaConfig,
+    time: Time,
+    startup: Boolean,
+    threadNamePrefix: Option[String],
+  ): KafkaBroker = {
     val broker = new BrokerServer(config = config,
       metaProps = new MetaProperties(clusterId, config.nodeId),
       raftManager = raftManager,
@@ -179,6 +189,8 @@ abstract class QuorumTestHarness extends Logging {
     }
   }
 
+  val faultHandler = new MockFaultHandler("quorumTestHarnessFaultHandler")
+
   // Note: according to the junit documentation: "JUnit Jupiter does not guarantee the execution
   // order of multiple @BeforeEach methods that are declared within a single test class or test
   // interface." Therefore, if you have things you would like to do before each test case runs, it
@@ -219,10 +231,13 @@ abstract class QuorumTestHarness extends Logging {
     }
   }
 
-  def createBroker(config: KafkaConfig,
-                   time: Time = Time.SYSTEM,
-                   startup: Boolean = true): KafkaBroker = {
-    implementation.createBroker(config, time, startup)
+  def createBroker(
+    config: KafkaConfig,
+    time: Time = Time.SYSTEM,
+    startup: Boolean = true,
+    threadNamePrefix: Option[String] = None
+  ): KafkaBroker = {
+    implementation.createBroker(config, time, startup, threadNamePrefix)
   }
 
   def shutdownZooKeeper(): Unit = asZk().shutdown()
@@ -296,6 +311,8 @@ abstract class QuorumTestHarness extends Logging {
         configSchema = KafkaRaftServer.configSchema,
         raftApiVersions = raftManager.apiVersions,
         bootstrapMetadata = BootstrapMetadata.create(metadataVersion, bootstrapRecords.asJava),
+        metadataFaultHandler = faultHandler,
+        fatalFaultHandler = faultHandler,
       )
       controllerServer.socketServerFirstBoundPortFuture.whenComplete((port, e) => {
         if (e != null) {
@@ -362,6 +379,7 @@ abstract class QuorumTestHarness extends Logging {
     }
     System.clearProperty(JaasUtils.JAVA_LOGIN_CONFIG_PARAM)
     Configuration.setConfiguration(null)
+    faultHandler.maybeRethrowFirstException()
   }
 
   // Trigger session expiry by reusing the session id in another client
