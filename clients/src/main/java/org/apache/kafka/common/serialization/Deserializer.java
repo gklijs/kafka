@@ -17,8 +17,10 @@
 package org.apache.kafka.common.serialization;
 
 import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.utils.Utils;
 
 import java.io.Closeable;
+import java.nio.ByteBuffer;
 import java.util.Map;
 
 /**
@@ -58,6 +60,25 @@ public interface Deserializer<T> extends Closeable {
      */
     default T deserialize(String topic, Headers headers, byte[] data) {
         return deserialize(topic, data);
+    }
+
+    /**
+     * Deserialize a record value from a {@link ByteBuffer} into a value or object.
+     *
+     * <p>If {@code ByteBufferDeserializer} is used by an application, the application code cannot make any assumptions
+     * about the returned {@link ByteBuffer} like the position, limit, capacity, etc., or if it is backed by
+     * {@link ByteBuffer#hasArray() an array or not}.
+     *
+     * <p>Similarly, if this method is overridden, the implementation cannot make any assumptions about the
+     * passed in {@link ByteBuffer} either.
+     *
+     * @param topic topic associated with the data
+     * @param headers headers associated with the record; may be empty.
+     * @param data serialized ByteBuffer; may be null; implementations are recommended to handle null by returning a value or null rather than throwing an exception.
+     * @return deserialized typed data; may be null
+     */
+    default T deserialize(String topic, Headers headers, ByteBuffer data) {
+        return deserialize(topic, headers, Utils.toNullableArray(data));
     }
 
     /**

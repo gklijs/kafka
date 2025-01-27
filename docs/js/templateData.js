@@ -17,8 +17,8 @@ limitations under the License.
 
 // Define variables for doc templates
 var context={
-    "version": "33",
-    "dotVersion": "3.3",
-    "fullDotVersion": "3.3.0",
+    "version": "41",
+    "dotVersion": "4.1",
+    "fullDotVersion": "4.1.0",
     "scalaVersion": "2.13"
 };

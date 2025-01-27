@@ -16,9 +16,8 @@
  */
 package org.apache.kafka.common.requests;
 
-import java.util.Map.Entry;
-import java.util.stream.Collectors;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.OffsetFetchResponseData;
 import org.apache.kafka.common.message.OffsetFetchResponseData.OffsetFetchResponseGroup;
 import org.apache.kafka.common.message.OffsetFetchResponseData.OffsetFetchResponsePartition;
@@ -35,8 +34,10 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPOCH;
 
@@ -53,6 +54,8 @@ import static org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPO
  *   - {@link Errors#COORDINATOR_NOT_AVAILABLE}
  *   - {@link Errors#NOT_COORDINATOR}
  *   - {@link Errors#GROUP_AUTHORIZATION_FAILED}
+ *   - {@link Errors#UNKNOWN_MEMBER_ID}
+ *   - {@link Errors#STALE_MEMBER_EPOCH}
  */
 public class OffsetFetchResponse extends AbstractResponse {
     public static final long INVALID_OFFSET = -1L;
@@ -119,12 +122,6 @@ public class OffsetFetchResponse extends AbstractResponse {
         }
     }
 
-    public OffsetFetchResponse(OffsetFetchResponseData data) {
-        super(ApiKeys.OFFSET_FETCH);
-        this.data = data;
-        this.error = null;
-    }
-
     /**
      * Constructor without throttle time.
      * @param error Potential coordinator or group level error code (for api version 2 and later)
@@ -173,8 +170,8 @@ public class OffsetFetchResponse extends AbstractResponse {
      * @param responseData Fetched offset information grouped by topic-partition and by group
      */
     public OffsetFetchResponse(int throttleTimeMs,
-                               Map<String, Errors> errors, Map<String,
-                               Map<TopicPartition, PartitionData>> responseData) {
+                               Map<String, Errors> errors,
+                               Map<String, Map<TopicPartition, PartitionData>> responseData) {
         super(ApiKeys.OFFSET_FETCH);
         List<OffsetFetchResponseGroup> groupList = new ArrayList<>();
         for (Entry<String, Map<TopicPartition, PartitionData>> entry : responseData.entrySet()) {
@@ -206,6 +203,59 @@ public class OffsetFetchResponse extends AbstractResponse {
             .setGroups(groupList)
             .setThrottleTimeMs(throttleTimeMs);
         this.error = null;
+    }
+
+    public OffsetFetchResponse(List<OffsetFetchResponseGroup> groups, short version) {
+        super(ApiKeys.OFFSET_FETCH);
+        data = new OffsetFetchResponseData();
+
+        if (version >= 8) {
+            data.setGroups(groups);
+            error = null;
+
+            for (OffsetFetchResponseGroup group : data.groups()) {
+                this.groupLevelErrors.put(group.groupId(), Errors.forCode(group.errorCode()));
+            }
+        } else {
+            if (groups.size() != 1) {
+                throw new UnsupportedVersionException(
+                    "Version " + version + " of OffsetFetchResponse only supports one group."
+                );
+            }
+
+            OffsetFetchResponseGroup group = groups.get(0);
+            data.setErrorCode(group.errorCode());
+            error = Errors.forCode(group.errorCode());
+
+            group.topics().forEach(topic -> {
+                OffsetFetchResponseTopic newTopic = new OffsetFetchResponseTopic().setName(topic.name());
+                data.topics().add(newTopic);
+
+                topic.partitions().forEach(partition -> {
+                    OffsetFetchResponsePartition newPartition;
+
+                    if (version < 2 && group.errorCode() != Errors.NONE.code()) {
+                        // Versions prior to version 2 do not support a top level error. Therefore,
+                        // we put it at the partition level.
+                        newPartition = new OffsetFetchResponsePartition()
+                            .setPartitionIndex(partition.partitionIndex())
+                            .setErrorCode(group.errorCode())
+                            .setCommittedOffset(INVALID_OFFSET)
+                            .setMetadata(NO_METADATA)
+                            .setCommittedLeaderEpoch(NO_PARTITION_LEADER_EPOCH);
+                    } else {
+                        newPartition = new OffsetFetchResponsePartition()
+                            .setPartitionIndex(partition.partitionIndex())
+                            .setErrorCode(partition.errorCode())
+                            .setCommittedOffset(partition.committedOffset())
+                            .setMetadata(partition.metadata())
+                            .setCommittedLeaderEpoch(partition.committedLeaderEpoch());
+                    }
+
+                    newTopic.partitions().add(newPartition);
+                });
+            });
+        }
     }
 
     public OffsetFetchResponse(OffsetFetchResponseData data, short version) {
@@ -245,12 +295,21 @@ public class OffsetFetchResponse extends AbstractResponse {
         return data.throttleTimeMs();
     }
 
+    @Override
+    public void maybeSetThrottleTimeMs(int throttleTimeMs) {
+        data.setThrottleTimeMs(throttleTimeMs);
+    }
+
     public boolean hasError() {
         return error != Errors.NONE;
     }
 
     public boolean groupHasError(String groupId) {
-        return groupLevelErrors.get(groupId) != Errors.NONE;
+        Errors error = groupLevelErrors.get(groupId);
+        if (error == null) {
+            return this.error != null && this.error != Errors.NONE;
+        }
+        return error != Errors.NONE;
     }
 
     public Errors error() {

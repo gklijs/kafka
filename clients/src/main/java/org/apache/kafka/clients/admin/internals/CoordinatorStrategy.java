@@ -27,6 +27,7 @@ import org.apache.kafka.common.requests.FindCoordinatorRequest;
 import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType;
 import org.apache.kafka.common.requests.FindCoordinatorResponse;
 import org.apache.kafka.common.utils.LogContext;
+
 import org.slf4j.Logger;
 
 import java.util.Collections;
@@ -120,6 +121,10 @@ public class CoordinatorStrategy implements AdminApiLookupStrategy<CoordinatorKe
         batch = false;
     }
 
+    public boolean batch() {
+        return batch;
+    }
+
     private CoordinatorKey requireSingletonAndType(Set<CoordinatorKey> keys) {
         if (keys.size() != 1) {
             throw new IllegalArgumentException("Unexpected size of key set: expected 1, but got " + keys.size());
@@ -132,8 +137,8 @@ public class CoordinatorStrategy implements AdminApiLookupStrategy<CoordinatorKe
     }
 
     private void ensureSameType(Set<CoordinatorKey> keys) {
-        if (keys.size() < 1) {
-            throw new IllegalArgumentException("Unexpected size of key set: expected >= 1, but got " + keys.size());
+        if (keys.isEmpty()) {
+            throw new IllegalArgumentException("Unexpected size of key set: expected >= 1, but got 0");
         }
         if (keys.stream().filter(k -> k.type == type).collect(Collectors.toSet()).size() != keys.size()) {
             throw new IllegalArgumentException("Unexpected key set: expected all key to be of type " + type + ", but some key were not");

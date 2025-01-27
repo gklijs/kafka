@@ -23,7 +23,10 @@ import java.util.Objects;
 
 
 public class SubscriptionWrapper<K> {
-    static final byte CURRENT_VERSION = 1;
+    static final byte VERSION_0 = 0;
+    static final byte VERSION_1 = 1;
+
+    static final byte CURRENT_VERSION = VERSION_1;
 
     // v0 fields:
     private final long[] hash;
@@ -54,7 +57,7 @@ public class SubscriptionWrapper<K> {
             this.value = value;
         }
 
-        public byte getValue() {
+        public byte value() {
             return value;
         }
 
@@ -86,23 +89,23 @@ public class SubscriptionWrapper<K> {
         this.primaryPartition = primaryPartition;
     }
 
-    public Instruction getInstruction() {
+    public Instruction instruction() {
         return instruction;
     }
 
-    public long[] getHash() {
+    public long[] hash() {
         return hash;
     }
 
-    public K getPrimaryKey() {
+    public K primaryKey() {
         return primaryKey;
     }
 
-    public byte getVersion() {
+    public byte version() {
         return version;
     }
 
-    public Integer getPrimaryPartition() {
+    public Integer primaryPartition() {
         return primaryPartition;
     }
 
@@ -116,5 +119,25 @@ public class SubscriptionWrapper<K> {
             ", primaryPartition=" + primaryPartition +
             '}';
     }
-}
 
+    @Override
+    public boolean equals(final Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        final SubscriptionWrapper<?> that = (SubscriptionWrapper<?>) o;
+        return version == that.version && Arrays.equals(hash, that.hash)
+            && instruction == that.instruction && Objects.equals(primaryKey, that.primaryKey)
+            && Objects.equals(primaryPartition, that.primaryPartition);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = Objects.hash(instruction, version, primaryKey, primaryPartition);
+        result = 31 * result + Arrays.hashCode(hash);
+        return result;
+    }
+}

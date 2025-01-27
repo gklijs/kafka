@@ -17,23 +17,19 @@
 
 package kafka.server
 
-import kafka.admin.BrokerMetadata
-import kafka.server.metadata.{KRaftMetadataCache, ZkMetadataCache}
-import org.apache.kafka.common.message.{MetadataResponseData, UpdateMetadataRequestData}
+import kafka.server.metadata.{ConfigRepository, KRaftMetadataCache}
+import org.apache.kafka.admin.BrokerMetadata
+import org.apache.kafka.common.message.{DescribeClientQuotasRequestData, DescribeClientQuotasResponseData, DescribeTopicPartitionsResponseData, DescribeUserScramCredentialsRequestData, DescribeUserScramCredentialsResponseData, MetadataResponseData}
 import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.{Cluster, Node, TopicPartition, Uuid}
-import org.apache.kafka.server.common.MetadataVersion
+import org.apache.kafka.metadata.LeaderAndIsr
+import org.apache.kafka.server.common.{FinalizedFeatures, KRaftVersion, MetadataVersion}
 
 import java.util
+import java.util.function.Supplier
+import scala.collection._
 
-case class FinalizedFeaturesAndEpoch(features: Map[String, Short], epoch: Long) {
-  override def toString(): String = {
-    s"FinalizedFeaturesAndEpoch(features=$features, epoch=$epoch)"
-  }
-}
-
-trait MetadataCache {
-
+trait MetadataCache extends ConfigRepository {
   /**
    * Return topic metadata for a given set of topics and listener. See KafkaApis#handleTopicMetadataRequest for details
    * on the use of the two boolean flags.
@@ -60,6 +56,12 @@ trait MetadataCache {
 
   def getAliveBrokers(): Iterable[BrokerMetadata]
 
+  def getAliveBrokerEpoch(brokerId: Int): Option[Long]
+
+  def isBrokerFenced(brokerId: Int): Boolean
+
+  def isBrokerShuttingDown(brokerId: Int): Boolean
+
   def getTopicId(topicName: String): Uuid
 
   def getTopicName(topicId: Uuid): Option[String]
@@ -68,7 +70,9 @@ trait MetadataCache {
 
   def getAliveBrokerNodes(listenerName: ListenerName): Iterable[Node]
 
-  def getPartitionInfo(topic: String, partitionId: Int): Option[UpdateMetadataRequestData.UpdateMetadataPartitionState]
+  def getBrokerNodes(listenerName: ListenerName): Iterable[Node]
+
+  def getLeaderAndIsr(topic: String, partitionId: Int): Option[LeaderAndIsr]
 
   /**
    * Return the number of partitions in the given topic, or None if the given topic does not exist.
@@ -92,8 +96,6 @@ trait MetadataCache {
 
   def getPartitionReplicaEndpoints(tp: TopicPartition, listenerName: ListenerName): Map[Int, Node]
 
-  def getControllerId: Option[Int]
-
   def getClusterMetadata(clusterId: String, listenerName: ListenerName): Cluster
 
   def contains(topic: String): Boolean
@@ -102,17 +104,44 @@ trait MetadataCache {
 
   def metadataVersion(): MetadataVersion
 
-  def features(): FinalizedFeaturesAndEpoch
+  def getRandomAliveBrokerId: Option[Int]
+
+  def features(): FinalizedFeatures
+
+  def describeClientQuotas(request: DescribeClientQuotasRequestData): DescribeClientQuotasResponseData
+
+  def describeScramCredentials(request: DescribeUserScramCredentialsRequestData): DescribeUserScramCredentialsResponseData
+
+  /**
+   * Get the topic metadata for the given topics.
+   *
+   * The quota is used to limit the number of partitions to return. The NextTopicPartition field points to the first
+   * partition can't be returned due the limit.
+   * If a topic can't return any partition due to quota limit reached, this topic will not be included in the response.
+   *
+   * Note, the topics should be sorted in alphabetical order. The topics in the DescribeTopicPartitionsResponseData
+   * will also be sorted in alphabetical order.
+   *
+   * @param topics                        The iterator of topics and their corresponding first partition id to fetch.
+   * @param listenerName                  The listener name.
+   * @param topicPartitionStartIndex      The start partition index for the first topic
+   * @param maximumNumberOfPartitions     The max number of partitions to return.
+   * @param ignoreTopicsWithExceptions    Whether ignore the topics with exception.
+   */
+  def describeTopicResponse(
+    topics: Iterator[String],
+    listenerName: ListenerName,
+    topicPartitionStartIndex: String => Int,
+    maximumNumberOfPartitions: Int,
+    ignoreTopicsWithExceptions: Boolean
+  ): DescribeTopicPartitionsResponseData
 }
 
 object MetadataCache {
-  def zkMetadataCache(brokerId: Int,
-                      metadataVersion: MetadataVersion,
-                      brokerFeatures: BrokerFeatures = BrokerFeatures.createEmpty()): ZkMetadataCache = {
-    new ZkMetadataCache(brokerId, metadataVersion, brokerFeatures)
-  }
-
-  def kRaftMetadataCache(brokerId: Int): KRaftMetadataCache = {
-    new KRaftMetadataCache(brokerId)
+  def kRaftMetadataCache(
+    brokerId: Int,
+    kraftVersionSupplier: Supplier[KRaftVersion]
+  ): KRaftMetadataCache = {
+    new KRaftMetadataCache(brokerId, kraftVersionSupplier)
   }
 }

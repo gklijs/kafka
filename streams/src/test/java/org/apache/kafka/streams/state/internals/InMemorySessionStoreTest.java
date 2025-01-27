@@ -16,59 +16,24 @@
  */
 package org.apache.kafka.streams.state.internals;
 
-import org.apache.kafka.common.header.internals.RecordHeaders;
-import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.kstream.internals.SessionWindow;
-import org.apache.kafka.streams.query.Position;
-import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
 import org.apache.kafka.streams.state.KeyValueIterator;
-import org.apache.kafka.streams.state.SessionStore;
-import org.apache.kafka.streams.state.Stores;
-import org.junit.Test;
+
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.HashSet;
 
-import static java.time.Duration.ofMillis;
-import static org.apache.kafka.common.utils.Utils.mkEntry;
-import static org.apache.kafka.common.utils.Utils.mkMap;
 import static org.apache.kafka.test.StreamsTestUtils.valuesToSet;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class InMemorySessionStoreTest extends AbstractSessionBytesStoreTest {
 
-    private static final String STORE_NAME = "in-memory session store";
-
     @Override
-    <K, V> SessionStore<K, V> buildSessionStore(final long retentionPeriod,
-                                                 final Serde<K> keySerde,
-                                                 final Serde<V> valueSerde) {
-        return Stores.sessionStoreBuilder(
-            Stores.inMemorySessionStore(
-                STORE_NAME,
-                ofMillis(retentionPeriod)),
-            keySerde,
-            valueSerde).build();
-    }
-
-    @Test
-    public void shouldRemoveExpired() {
-        sessionStore.put(new Windowed<>("a", new SessionWindow(0, 0)), 1L);
-        sessionStore.put(new Windowed<>("aa", new SessionWindow(0, 10)), 2L);
-        sessionStore.put(new Windowed<>("a", new SessionWindow(10, 20)), 3L);
-
-        // Advance stream time to expire the first record
-        sessionStore.put(new Windowed<>("aa", new SessionWindow(10, RETENTION_PERIOD)), 4L);
-
-        try (final KeyValueIterator<Windowed<String>, Long> iterator =
-            sessionStore.findSessions("a", "b", 0L, Long.MAX_VALUE)
-        ) {
-            assertEquals(valuesToSet(iterator), new HashSet<>(Arrays.asList(2L, 3L, 4L)));
-        }
+    StoreType storeType() {
+        return StoreType.InMemoryStore;
     }
 
     @Test
@@ -87,25 +52,11 @@ public class InMemorySessionStoreTest extends AbstractSessionBytesStoreTest {
         assertFalse(iterator.hasNext());
 
         iterator.close();
-        assertFalse(sessionStore.findSessions("a", "b", 0L, 20L).hasNext());
-    }
 
-    @Test
-    public void shouldMatchPositionAfterPut() {
-        final MeteredSessionStore<String, Long> meteredSessionStore = (MeteredSessionStore<String, Long>) sessionStore;
-        final ChangeLoggingSessionBytesStore changeLoggingSessionBytesStore = (ChangeLoggingSessionBytesStore) meteredSessionStore.wrapped();
-        final InMemorySessionStore inMemorySessionStore = (InMemorySessionStore) changeLoggingSessionBytesStore.wrapped();
-
-        context.setRecordContext(new ProcessorRecordContext(0, 1, 0, "", new RecordHeaders()));
-        sessionStore.put(new Windowed<String>("a", new SessionWindow(0, 0)), 1L);
-        context.setRecordContext(new ProcessorRecordContext(0, 2, 0, "", new RecordHeaders()));
-        sessionStore.put(new Windowed<String>("aa", new SessionWindow(0, 10)), 2L);
-        context.setRecordContext(new ProcessorRecordContext(0, 3, 0, "", new RecordHeaders()));
-        sessionStore.put(new Windowed<String>("a", new SessionWindow(10, 20)), 3L);
-
-        final Position expected = Position.fromMap(mkMap(mkEntry("", mkMap(mkEntry(0, 3L)))));
-        final Position actual = inMemorySessionStore.getPosition();
-        assertThat(expected, is(actual));
+        try (final KeyValueIterator<Windowed<String>, Long> it =
+             sessionStore.findSessions("a", "b", 0L, 20L)) {
+            assertFalse(it.hasNext());
+        }
     }
 
 }

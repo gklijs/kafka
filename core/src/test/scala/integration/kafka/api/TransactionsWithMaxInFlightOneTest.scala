@@ -18,18 +18,21 @@
 package kafka.api
 
 import java.util.Properties
-
 import kafka.integration.KafkaServerTestHarness
 import kafka.server.KafkaConfig
-import kafka.utils.TestUtils
+import kafka.utils.{TestInfoUtils, TestUtils}
 import kafka.utils.TestUtils.consumeRecords
-import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.clients.consumer.Consumer
 import org.apache.kafka.clients.producer.KafkaProducer
+import org.apache.kafka.coordinator.group.GroupCoordinatorConfig
+import org.apache.kafka.coordinator.transaction.{TransactionLogConfig, TransactionStateManagerConfig}
+import org.apache.kafka.server.config.{ReplicationConfigs, ServerConfigs, ServerLogConfigs}
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.{AfterEach, BeforeEach, Test, TestInfo}
+import org.junit.jupiter.api.{AfterEach, BeforeEach, TestInfo}
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.MethodSource
 
-import scala.collection.Seq
-import scala.collection.mutable.Buffer
+import scala.collection.{Seq, mutable}
 import scala.jdk.CollectionConverters._
 
 /**
@@ -37,26 +40,26 @@ import scala.jdk.CollectionConverters._
  * A single broker is used to verify edge cases where different requests are queued on the same connection.
  */
 class TransactionsWithMaxInFlightOneTest extends KafkaServerTestHarness {
-  val numServers = 1
+  val numBrokers = 1
 
   val topic1 = "topic1"
   val topic2 = "topic2"
   val numPartitions = 4
 
-  val transactionalProducers = Buffer[KafkaProducer[Array[Byte], Array[Byte]]]()
-  val transactionalConsumers = Buffer[KafkaConsumer[Array[Byte], Array[Byte]]]()
+  val transactionalProducers = mutable.Buffer[KafkaProducer[Array[Byte], Array[Byte]]]()
+  val transactionalConsumers = mutable.Buffer[Consumer[Array[Byte], Array[Byte]]]()
 
   override def generateConfigs: Seq[KafkaConfig] = {
-    TestUtils.createBrokerConfigs(numServers, zkConnect).map(KafkaConfig.fromProps(_, serverProps()))
+    TestUtils.createBrokerConfigs(numBrokers).map(KafkaConfig.fromProps(_, serverProps()))
   }
 
   @BeforeEach
   override def setUp(testInfo: TestInfo): Unit = {
     super.setUp(testInfo)
     val topicConfig = new Properties()
-    topicConfig.put(KafkaConfig.MinInSyncReplicasProp, 1.toString)
-    createTopic(topic1, numPartitions, numServers, topicConfig)
-    createTopic(topic2, numPartitions, numServers, topicConfig)
+    topicConfig.put(ServerLogConfigs.MIN_IN_SYNC_REPLICAS_CONFIG, 1.toString)
+    createTopic(topic1, numPartitions, numBrokers, topicConfig)
+    createTopic(topic2, numPartitions, numBrokers, topicConfig)
 
     createTransactionalProducer("transactional-producer")
     createReadCommittedConsumer("transactional-group")
@@ -69,10 +72,11 @@ class TransactionsWithMaxInFlightOneTest extends KafkaServerTestHarness {
     super.tearDown()
   }
 
-  @Test
-  def testTransactionalProducerSingleBrokerMaxInFlightOne(): Unit = {
+  @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedQuorumAndGroupProtocolNames)
+  @MethodSource(Array("getTestQuorumAndGroupProtocolParametersAll"))
+  def testTransactionalProducerSingleBrokerMaxInFlightOne(quorum: String, groupProtocol: String): Unit = {
     // We want to test with one broker to verify multiple requests queued on a connection
-    assertEquals(1, servers.size)
+    assertEquals(1, brokers.size)
 
     val producer = transactionalProducers.head
     val consumer = transactionalConsumers.head
@@ -100,22 +104,23 @@ class TransactionsWithMaxInFlightOneTest extends KafkaServerTestHarness {
 
   private def serverProps() = {
     val serverProps = new Properties()
-    serverProps.put(KafkaConfig.AutoCreateTopicsEnableProp, false.toString)
-    serverProps.put(KafkaConfig.OffsetsTopicPartitionsProp, 1.toString)
-    serverProps.put(KafkaConfig.OffsetsTopicReplicationFactorProp, 1.toString)
-    serverProps.put(KafkaConfig.TransactionsTopicPartitionsProp, 1.toString)
-    serverProps.put(KafkaConfig.TransactionsTopicReplicationFactorProp, 1.toString)
-    serverProps.put(KafkaConfig.TransactionsTopicMinISRProp, 1.toString)
-    serverProps.put(KafkaConfig.ControlledShutdownEnableProp, true.toString)
-    serverProps.put(KafkaConfig.UncleanLeaderElectionEnableProp, false.toString)
-    serverProps.put(KafkaConfig.AutoLeaderRebalanceEnableProp, false.toString)
-    serverProps.put(KafkaConfig.GroupInitialRebalanceDelayMsProp, "0")
-    serverProps.put(KafkaConfig.TransactionsAbortTimedOutTransactionCleanupIntervalMsProp, "200")
+    serverProps.put(ServerLogConfigs.AUTO_CREATE_TOPICS_ENABLE_CONFIG, false.toString)
+    serverProps.put(GroupCoordinatorConfig.OFFSETS_TOPIC_PARTITIONS_CONFIG, 1.toString)
+    serverProps.put(GroupCoordinatorConfig.OFFSETS_TOPIC_REPLICATION_FACTOR_CONFIG, 1.toString)
+    serverProps.put(TransactionLogConfig.TRANSACTIONS_TOPIC_PARTITIONS_CONFIG, 1.toString)
+    serverProps.put(TransactionLogConfig.TRANSACTIONS_TOPIC_REPLICATION_FACTOR_CONFIG, 1.toString)
+    serverProps.put(TransactionLogConfig.TRANSACTIONS_TOPIC_MIN_ISR_CONFIG, 1.toString)
+    serverProps.put(ServerConfigs.CONTROLLED_SHUTDOWN_ENABLE_CONFIG, true.toString)
+    serverProps.put(ReplicationConfigs.UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG, false.toString)
+    serverProps.put(ReplicationConfigs.AUTO_LEADER_REBALANCE_ENABLE_CONFIG, false.toString)
+    serverProps.put(GroupCoordinatorConfig.GROUP_INITIAL_REBALANCE_DELAY_MS_CONFIG, "0")
+    serverProps.put(TransactionStateManagerConfig.TRANSACTIONS_ABORT_TIMED_OUT_TRANSACTION_CLEANUP_INTERVAL_MS_CONFIG, "200")
     serverProps
   }
 
   private def createReadCommittedConsumer(group: String) = {
     val consumer = TestUtils.createConsumer(bootstrapServers(),
+      groupProtocolFromTestParameters(),
       groupId = group,
       enableAutoCommit = false,
       readCommitted = true)
@@ -124,7 +129,7 @@ class TransactionsWithMaxInFlightOneTest extends KafkaServerTestHarness {
   }
 
   private def createTransactionalProducer(transactionalId: String): KafkaProducer[Array[Byte], Array[Byte]] = {
-    val producer = TestUtils.createTransactionalProducer(transactionalId, servers, maxInFlight = 1)
+    val producer = TestUtils.createTransactionalProducer(transactionalId, brokers, maxInFlight = 1)
     transactionalProducers += producer
     producer
   }

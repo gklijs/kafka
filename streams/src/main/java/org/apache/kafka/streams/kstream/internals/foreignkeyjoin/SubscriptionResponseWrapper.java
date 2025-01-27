@@ -19,9 +19,10 @@ package org.apache.kafka.streams.kstream.internals.foreignkeyjoin;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 
 import java.util.Arrays;
+import java.util.Objects;
 
 public class SubscriptionResponseWrapper<FV> {
-    final static byte CURRENT_VERSION = 0;
+    static final byte CURRENT_VERSION = 0;
     // v0 fields:
     private final long[] originalValueHash;
     private final FV foreignValue;
@@ -47,19 +48,19 @@ public class SubscriptionResponseWrapper<FV> {
         this.primaryPartition = primaryPartition;
     }
 
-    public long[] getOriginalValueHash() {
+    public long[] originalValueHash() {
         return originalValueHash;
     }
 
-    public FV getForeignValue() {
+    public FV foreignValue() {
         return foreignValue;
     }
 
-    public byte getVersion() {
+    public byte version() {
         return version;
     }
 
-    public Integer getPrimaryPartition() {
+    public Integer primaryPartition() {
         return primaryPartition;
     }
 
@@ -71,5 +72,28 @@ public class SubscriptionResponseWrapper<FV> {
             ", originalValueHash=" + Arrays.toString(originalValueHash) +
             ", primaryPartition=" + primaryPartition +
             '}';
+    }
+
+    @Override
+    public boolean equals(final Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        final SubscriptionResponseWrapper<?> that = (SubscriptionResponseWrapper<?>) o;
+        return version == that.version &&
+               Arrays.equals(originalValueHash,
+               that.originalValueHash) &&
+               Objects.equals(foreignValue, that.foreignValue) &&
+               Objects.equals(primaryPartition, that.primaryPartition);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = Objects.hash(foreignValue, version, primaryPartition);
+        result = 31 * result + Arrays.hashCode(originalValueHash);
+        return result;
     }
 }

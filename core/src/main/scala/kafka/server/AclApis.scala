@@ -18,24 +18,26 @@
 package kafka.server
 
 import kafka.network.RequestChannel
-import kafka.security.authorizer.AuthorizerUtils
 import kafka.utils.Logging
 import org.apache.kafka.common.acl.AclOperation._
 import org.apache.kafka.common.acl.AclBinding
 import org.apache.kafka.common.errors._
 import org.apache.kafka.common.message.CreateAclsResponseData.AclCreationResult
+import org.apache.kafka.common.message.DeleteAclsResponseData.DeleteAclsFilterResult
 import org.apache.kafka.common.message._
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.requests._
 import org.apache.kafka.common.resource.Resource.CLUSTER_NAME
 import org.apache.kafka.common.resource.ResourceType
+import org.apache.kafka.security.authorizer.AuthorizerUtils
 import org.apache.kafka.server.authorizer._
-import java.util
 
+import java.util
+import java.util.concurrent.CompletableFuture
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable
-import scala.compat.java8.OptionConverters._
 import scala.jdk.CollectionConverters._
+import scala.jdk.OptionConverters.RichOptional
 
 /**
  * Logic to handle ACL requests.
@@ -53,7 +55,7 @@ class AclApis(authHelper: AuthHelper,
 
   def close(): Unit = alterAclsPurgatory.shutdown()
 
-  def handleDescribeAcls(request: RequestChannel.Request): Unit = {
+  def handleDescribeAcls(request: RequestChannel.Request): CompletableFuture[Unit] = {
     authHelper.authorizeClusterOperation(request, DESCRIBE)
     val describeAclsRequest = request.body[DescribeAclsRequest]
     authorizer match {
@@ -66,17 +68,16 @@ class AclApis(authHelper: AuthHelper,
           describeAclsRequest.version))
       case Some(auth) =>
         val filter = describeAclsRequest.filter
-        val returnedAcls = new util.HashSet[AclBinding]()
-        auth.acls(filter).forEach(returnedAcls.add)
         requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs =>
           new DescribeAclsResponse(new DescribeAclsResponseData()
             .setThrottleTimeMs(requestThrottleMs)
-            .setResources(DescribeAclsResponse.aclsResources(returnedAcls)),
+            .setResources(DescribeAclsResponse.aclsResources(auth.acls(filter))),
           describeAclsRequest.version))
     }
+    CompletableFuture.completedFuture[Unit](())
   }
 
-  def handleCreateAcls(request: RequestChannel.Request): Unit = {
+  def handleCreateAcls(request: RequestChannel.Request): CompletableFuture[Unit] = {
     authHelper.authorizeClusterOperation(request, ALTER)
     val createAclsRequest = request.body[CreateAclsRequest]
 
@@ -84,6 +85,7 @@ class AclApis(authHelper: AuthHelper,
       case None => requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs =>
         createAclsRequest.getErrorResponse(requestThrottleMs,
           new SecurityDisabledException("No Authorizer is configured.")))
+        CompletableFuture.completedFuture[Unit](())
       case Some(auth) =>
         val allBindings = createAclsRequest.aclCreations.asScala.map(CreateAclsRequest.aclBinding)
         val errorResults = mutable.Map[AclBinding, AclCreateResult]()
@@ -103,13 +105,14 @@ class AclApis(authHelper: AuthHelper,
             validBindings += acl
         }
 
+        val future = new CompletableFuture[util.List[AclCreationResult]]()
         val createResults = auth.createAcls(request.context, validBindings.asJava).asScala.map(_.toCompletableFuture)
 
         def sendResponseCallback(): Unit = {
           val aclCreationResults = allBindings.map { acl =>
             val result = errorResults.getOrElse(acl, createResults(validBindings.indexOf(acl)).get)
             val creationResult = new AclCreationResult()
-            result.exception.asScala.foreach { throwable =>
+            result.exception.toScala.foreach { throwable =>
               val apiError = ApiError.fromThrowable(throwable)
               creationResult
                 .setErrorCode(apiError.error.code)
@@ -117,17 +120,20 @@ class AclApis(authHelper: AuthHelper,
             }
             creationResult
           }
+          future.complete(aclCreationResults.asJava)
+        }
+        alterAclsPurgatory.tryCompleteElseWatch(config.connectionsMaxIdleMs, createResults, sendResponseCallback)
+
+        future.thenApply[Unit] { aclCreationResults =>
           requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs =>
             new CreateAclsResponse(new CreateAclsResponseData()
               .setThrottleTimeMs(requestThrottleMs)
-              .setResults(aclCreationResults.asJava)))
+              .setResults(aclCreationResults)))
         }
-
-        alterAclsPurgatory.tryCompleteElseWatch(config.connectionsMaxIdleMs, createResults, sendResponseCallback)
     }
   }
 
-  def handleDeleteAcls(request: RequestChannel.Request): Unit = {
+  def handleDeleteAcls(request: RequestChannel.Request): CompletableFuture[Unit] = {
     authHelper.authorizeClusterOperation(request, ALTER)
     val deleteAclsRequest = request.body[DeleteAclsRequest]
     authorizer match {
@@ -135,13 +141,20 @@ class AclApis(authHelper: AuthHelper,
         requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs =>
           deleteAclsRequest.getErrorResponse(requestThrottleMs,
             new SecurityDisabledException("No Authorizer is configured.")))
+        CompletableFuture.completedFuture[Unit](())
       case Some(auth) =>
 
+        val future = new CompletableFuture[util.List[DeleteAclsFilterResult]]()
         val deleteResults = auth.deleteAcls(request.context, deleteAclsRequest.filters)
           .asScala.map(_.toCompletableFuture).toList
 
         def sendResponseCallback(): Unit = {
           val filterResults = deleteResults.map(_.get).map(DeleteAclsResponse.filterResult).asJava
+          future.complete(filterResults)
+        }
+
+        alterAclsPurgatory.tryCompleteElseWatch(config.connectionsMaxIdleMs, deleteResults, sendResponseCallback)
+        future.thenApply[Unit] { filterResults =>
           requestHelper.sendResponseMaybeThrottle(request, requestThrottleMs =>
             new DeleteAclsResponse(
               new DeleteAclsResponseData()
@@ -149,7 +162,6 @@ class AclApis(authHelper: AuthHelper,
                 .setFilterResults(filterResults),
               deleteAclsRequest.version))
         }
-        alterAclsPurgatory.tryCompleteElseWatch(config.connectionsMaxIdleMs, deleteResults, sendResponseCallback)
     }
   }
-}
+ }
